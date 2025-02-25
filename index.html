@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Validação de QR Code Pix</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    textarea {
+      width: 100%;
+      font-family: monospace;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 20px;
+    }
+    table, th, td {
+      border: 1px solid #ccc;
+    }
+    th, td {
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background-color: #f2f2f2;
+    }
+    #qrcode-preview {
+      margin-top: 10px;
+      margin-bottom: 20px;
+    }
+    #fetch-result {
+      white-space: pre-wrap; /* Para exibir JSON formatado */
+      background: #f9f9f9;
+      padding: 10px;
+      border: 1px solid #ccc;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Validação de QR Code Pix</h1>
+  
+  <label for="qrcode-input">Conteúdo do QR Code:</label><br>
+  <textarea id="qrcode-input" rows="5" placeholder="Cole aqui o conteúdo do QR Code"></textarea>
+  <br><br>
+  <button onclick="validateQRCode()">Validar QR Code</button>
+  
+  <h2>Preview do QR Code</h2>
+  <div id="qrcode-preview"></div>
+  
+  <h2>Resultado (Parse do QR Code)</h2>
+  <div id="result-table"></div>
+
+  <h2>Resultado da Requisição</h2>
+  <div id="fetch-result">Nenhuma requisição realizada ainda.</div>
+
+  <!-- Biblioteca para gerar o QR Code -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script>
+    // Função para calcular o CRC16-CCITT (padrão EMV)
+    function crc16(str) {
+      let crc = 0xFFFF;
+      for (let i = 0; i < str.length; i++) {
+        crc ^= str.charCodeAt(i) << 8;
+        for (let j = 0; j < 8; j++) {
+          crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+          crc &= 0xFFFF;
+        }
+      }
+      return crc.toString(16).toUpperCase().padStart(4, '0');
+    }
+
+    // Função para fazer o parse do formato TLV
+    function parseTLV(data) {
+      const result = {};
+      let index = 0;
+      while (index < data.length) {
+        const tag = data.substr(index, 2);
+        index += 2;
+        const len = parseInt(data.substr(index, 2), 10);
+        index += 2;
+        const value = data.substr(index, len);
+        index += len;
+        // Se a tag for "26" ou "62", assume subcampos e faz parse recursivo
+        if (tag === "26" || tag === "62") {
+          result[tag] = parseTLV(value);
+        } else {
+          result[tag] = value;
+        }
+      }
+      return result;
+    }
+
+    // Função principal para parse e validação do QR Code Pix
+    function parsePixQRCode(qrString) {
+      const parsedData = parseTLV(qrString);
+      
+      // Verifica se existe o campo "63" para checar o CRC
+      const indexField63 = qrString.indexOf("63");
+      if (indexField63 === -1) {
+        parsedData.isValid = false;
+      } else {
+        const field63 = parsedData["63"];
+        // Se o campo 63 tiver 4 caracteres hexadecimais, consideramos CRC
+        if (field63 && field63.length === 4 && /^[0-9A-F]{4}$/i.test(field63)) {
+          const crcPayload = qrString.substring(0, indexField63 + 4);
+          const computedCRC = crc16(crcPayload);
+          parsedData.isValid = (computedCRC === field63);
+        } else {
+          parsedData.isValid = false;
+        }
+      }
+      
+      return parsedData;
+    }
+
+    // Função para construir uma tabela HTML a partir de um objeto
+    function buildTable(obj) {
+      let html = '<table>';
+      html += '<tr><th>Campo</th><th>Valor</th></tr>';
+      for (let key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          let value = obj[key];
+          if (typeof value === "object") {
+            value = buildTable(value);
+          }
+          html += '<tr><td>' + key + '</td><td>' + value + '</td></tr>';
+        }
+      }
+      html += '</table>';
+      return html;
+    }
+
+    // Função acionada ao clicar no botão para validar o QR Code
+    function validateQRCode() {
+      const qrInput = document.getElementById("qrcode-input").value.trim();
+      if (!qrInput) {
+        alert("Por favor, insira o conteúdo do QR Code.");
+        return;
+      }
+
+      // Limpa o preview e o resultado da requisição
+      document.getElementById("qrcode-preview").innerHTML = "";
+      document.getElementById("fetch-result").innerHTML = "Nenhuma requisição realizada ainda.";
+
+      // Gera o preview do QR Code com nível de correção L
+      new QRCode(document.getElementById("qrcode-preview"), {
+        text: qrInput,
+        width: 200,
+        height: 200,
+        correctLevel: QRCode.CorrectLevel.L
+      });
+
+      // Faz o parse e validação do QR Code
+      const result = parsePixQRCode(qrInput);
+
+      // Exibe a tabela de parse
+      document.getElementById("result-table").innerHTML = buildTable(result);
+
+      // Se houver um link no subcampo 25 dentro de 26, faz requisição
+      let link = null;
+      if (result["26"] && typeof result["26"] === "object" && result["26"]["25"]) {
+        link = result["26"]["25"];
+      }
+
+      // Caso queira procurar em outro lugar, descomente/adapte:
+      // if (!link && result["25"]) { link = result["25"]; }
+
+      if (link) {
+        // Garante que o link tenha protocolo
+        if (!link.startsWith("http://") && !link.startsWith("https://")) {
+          link = "https://" + link;
+        }
+
+        // Indica que vai buscar
+        document.getElementById("fetch-result").innerText = "Buscando... (" + link + ")";
+
+        // Faz a requisição GET
+        fetch(link)
+          .then(response => response.text())
+          .then(data => {
+            // Tenta exibir como JSON formatado
+            try {
+              const json = JSON.parse(data);
+              document.getElementById("fetch-result").innerText = JSON.stringify(json, null, 2);
+            } catch (err) {
+              // Se não for JSON, exibe texto puro
+              document.getElementById("fetch-result").innerText = data;
+            }
+          })
+          .catch(err => {
+            document.getElementById("fetch-result").innerText = "Erro ao buscar: " + err;
+          });
+      }
+    }
+  </script>
+</body>
+</html>
